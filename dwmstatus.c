@@ -10,12 +10,10 @@
 #include <time.h>
 #include <sys/types.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/statvfs.h>
 
 #include <X11/Xlib.h>
-
-#include <alsa/asoundlib.h>
-#include <alsa/control.h>
 
 #include "config.h"
 
@@ -44,175 +42,78 @@ smprintf(char *fmt, ...)
 }
 
 char *
-readfile(char *base, char *file)
+battery(int batfd)
 {
-	char *path, line[513];
-	FILE *fd;
+	static char buf[8];
+	ssize_t rd;
 
-	memset(line, 0, sizeof(line));
+	rd = read(batfd, &buf, sizeof buf);
+	buf[rd-1] = '%';
+	buf[rd] = 0;
+	lseek(batfd, 0, SEEK_SET);
 
-	path = smprintf("%s/%s", base, file);
-	fd = fopen(path, "r");
-	if (fd == NULL)
-		return NULL;
-	free(path);
-
-	if (fgets(line, sizeof(line)-1, fd) == NULL)
-		return NULL;
-	fclose(fd);
-
-	return smprintf("%s", line);
+	return buf;
 }
 
 char *
-freespace(char *mntpt)
+mktimes(char *fmt, time_t tim)
 {
-	struct statvfs fs;
-	double total, used = 0;
-
-	if ((statvfs(mntpt, &fs)) < 0) {
-		fprintf(stderr, "can't get info on disk.\n");
-		return("?");
-	}
-
-	total = (fs.f_blocks * fs.f_frsize);
-	used = (fs.f_blocks - fs.f_bfree) * fs.f_frsize ;
-	return (smprintf("%.0f", (used / total * 100)));
-}
-
-/*
- * Linux seems to change the filenames after suspend/hibernate
- * according to a random scheme. So just check for both possibilities.
- */
-char *
-battery(char *base)
-{
-	char *co;
-	int descap, remcap;
-
-	descap = -1;
-	remcap = -1;
-
-	co = readfile(base, "present");
-	if (co == NULL || co[0] != '1') {
-		if (co != NULL) free(co);
-		return smprintf("?");
-	}
-	free(co);
-
-	co = readfile(base, "charge_full_design");
-	if (co == NULL) {
-		co = readfile(base, "energy_full_design");
-		if (co == NULL)
-			return smprintf("");
-	}
-	sscanf(co, "%d", &descap);
-	free(co);
-
-	co = readfile(base, "charge_now");
-	if (co == NULL) {
-		co = readfile(base, "energy_now");
-		if (co == NULL)
-			return smprintf("");
-	}
-	sscanf(co, "%d", &remcap);
-	free(co);
-
-	if (remcap < 0 || descap < 0)
-		return smprintf("invalid");
-
-	return smprintf("%.0f", ((float)remcap / (float)descap) * 100);
-}
-
-char *
-mktimes(char *fmt, char *tzname)
-{
-	char buf[129];
-	time_t tim;
+	static char buf[128];
 	struct tm *timtm;
+	size_t n;
 
-	memset(buf, 0, sizeof(buf));
-	setenv("TZ", tzname, 1);
-
-	tim = time(NULL);
-	timtm = localtime(&tim);
-
-	if (timtm == NULL)
+	
+	if (!(timtm = localtime(&tim)))
 		fatal("localtime\n");
 
-	if (!strftime(buf, sizeof(buf)-1, fmt, timtm))
+	if (!(n = strftime(buf, sizeof(buf)-1, fmt, timtm)))
 		fatal("strftime == 0\n");
+	buf[n] = 0;
 
-	return smprintf(buf);
+	return buf;
 }
 
 int
 main(int argc, char *argv[])
 {
-	char *status = NULL;
+	static char buf[128];
 	char *date = NULL;
 	char *bat = NULL;
-	char *home = NULL;
-	char *root = NULL;
-	char *vol = NULL;
 	double avgs[3];
 	time_t now = 0;
 	time_t lasttime[2] = { 0, 0 };
-	snd_hctl_t *hctl;
-	snd_ctl_elem_id_t *id;
-	snd_ctl_elem_value_t *control;
-
-	// To find card and subdevice: /proc/asound/, aplay -L, amixer controls
-	snd_hctl_open(&hctl, "hw:0", 0);
-	snd_hctl_load(hctl);
-
-	snd_ctl_elem_id_alloca(&id);
-	snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_MIXER);
-
-	// amixer controls
-	snd_ctl_elem_id_set_name(id, "Master Playback Volume");
-	snd_hctl_elem_t *elem = snd_hctl_find_elem(hctl, id);
-	snd_ctl_elem_value_alloca(&control);
-	snd_ctl_elem_value_set_id(control, id);
+	int batfd = -1;
 
 	if (!(dpy = XOpenDisplay(NULL)))
 		fatal("dwmstatus: cannot open display.\n");
 
+	setenv("TZ", default_tz, 1);
+
+	bat = "?";
+	batfd = open("/sys/class/power_supply/BAT0/capacity", O_RDONLY);
+
 	for (;;) {
-		now = time(NULL);
-		if (difftime(now, lasttime[0]) >= 60) {
-			free(date);
-			free(bat);
-			date = mktimes("%a %d %b %H:%M", default_tz);
-			bat = battery("/sys/class/power_supply/BAT0/");
+		/*if (difftime(now, lasttime[0]) >= 60) {*/
+			now = time(NULL);
+			date = mktimes("%a %d %b %H:%M", now);
+			if (batfd != -1)
+				bat = battery(batfd);
+			if (getloadavg(avgs, 3) < 0)
+				fatal("dwmstatus: failed to get loadavg\n");
 			lasttime[0] = now;
-		}
-		if (difftime(now, lasttime[1]) >= 300) {
-			free(home);
-			free(root);
-			home = freespace("/home");
-			root = freespace("/");
-			lasttime[1] = now;
-		}
+		/*}*/
 
-		if (getloadavg(avgs, 3) < 0)
-			fatal("dwmstatus: failed to get loadavg\n");
+		/* | \x0019*/
+		snprintf(buf, sizeof buf-1,
+		    " AVG %.2f %.2f %.2f | BAT %s | %s ",
+		    avgs[0], avgs[1], avgs[2], bat, date);
 
-		snd_hctl_elem_read(elem, control);
-		vol = smprintf("%.0d", snd_ctl_elem_value_get_integer(control, 0));
-
-		status = smprintf("VOL: %s%% | AVG: %.2f %.2f %.2f | SSD: / %s%% ~ %s%% | BAT: %s% | %s",
-				vol, avgs[0], avgs[1], avgs[2], root, home, bat, date);
-
-		XStoreName(dpy, DefaultRootWindow(dpy), status);
+		XStoreName(dpy, DefaultRootWindow(dpy), buf);
 		XSync(dpy, False);
 
-		free(status);
-		free(vol);
-		sleep(1);
+		sleep(60);
 	}
 
 	XCloseDisplay(dpy);
-	snd_hctl_close(hctl);
 	return 0;
 }
