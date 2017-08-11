@@ -104,14 +104,20 @@ main(int argc, char *argv[])
 		/*}*/
 
 		/* | \x0019*/
-		snprintf(buf, sizeof buf-1,
-		    " AVG %.2f %.2f %.2f | BAT %s | %s ",
-		    avgs[0], avgs[1], avgs[2], bat, date);
+		if (batfd != -1) {
+			snprintf(buf, sizeof buf-1,
+			    " AVG %.2f %.2f %.2f | BAT %s | %s ",
+			    avgs[0], avgs[1], avgs[2], bat, date);
+		} else {
+			snprintf(buf, sizeof buf-1,
+			    " AVG %.2f %.2f %.2f | %s ",
+			    avgs[0], avgs[1], avgs[2], date);
+		}
 
 		XStoreName(dpy, DefaultRootWindow(dpy), buf);
 		XSync(dpy, False);
 
-		sleep(60);
+		sleep(1);
 	}
 
 	XCloseDisplay(dpy);
